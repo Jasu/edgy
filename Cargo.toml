@@ -1,0 +1,18 @@
+[package]
+name = "edgy"
+version = "0.0.1"
+authors = [ "Jasu <jasu@xn--njmtys-xxab.info>" ]
+license = "ISC"
+description = "Run commands on screen edge crossing touch screen gestures."
+
+[dependencies]
+clap = "2"
+nom = "1.2.3"
+
+[dependencies.x11]
+version = "2.5.*"
+features = ["xlib", "xinput"]
+
+[[bin]]
+name = "edgy"
+path = "src/main.rs"
