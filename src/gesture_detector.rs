@@ -5,6 +5,7 @@ use config::Config;
 #[derive(Debug, Copy, Clone)]
 struct Touch {
     touch_id: i32,
+    device_id: i32,
     start_x: f64,
     start_y: f64,
     // Is the touch accepted or rejected.
@@ -27,11 +28,10 @@ pub enum Direction {
     Left,
 }
 
-pub type AcceptRejectHook = FnMut(i32);
 pub type GestureHook = FnMut(Side, Direction, u32);
 
 pub struct GestureDetector<'a> {
-    config: & 'a Config,
+    pub config: & 'a Config,
     // Total number of touches in the current gesture. Note that they might not 
     // be down at the same time.
     current_num_touches: u32,
@@ -44,8 +44,8 @@ pub struct GestureDetector<'a> {
     // Currently pressed touches, keyed by touch id
     active_touches: HashMap<i32, Touch>,
 
-    on_accept_touch: & 'a mut (FnMut(i32) + 'a),
-    on_reject_touch: & 'a mut (FnMut(i32) + 'a),
+    on_accept_touch: & 'a mut (FnMut(i32, i32) + 'a),
+    on_reject_touch: & 'a mut (FnMut(i32, i32) + 'a),
 
     on_gesture: Option<& 'a mut (FnMut(&mut GestureDetector, Side, Direction, u32) + 'a)>,
 
@@ -56,8 +56,8 @@ pub struct GestureDetector<'a> {
 
 impl <'a>GestureDetector<'a> {
     pub fn new(config: & 'a Config,
-               on_accept_touch: & 'a mut (FnMut (i32) + 'a),
-               on_reject_touch: & 'a mut (FnMut (i32) + 'a),
+               on_accept_touch: & 'a mut (FnMut (i32, i32) + 'a),
+               on_reject_touch: & 'a mut (FnMut (i32, i32) + 'a),
                on_gesture: & 'a mut (FnMut (&mut GestureDetector, Side, Direction, u32) + 'a))
         -> GestureDetector<'a>
         {
@@ -102,25 +102,25 @@ impl <'a>GestureDetector<'a> {
         }
     }
 
-    fn reject_touch(&mut self, touch_id: i32) {
+    fn reject_touch(&mut self, touch_id: i32, device_id: i32) {
         if self.accept_all {
-            (*self.on_accept_touch)(touch_id);
+            (*self.on_accept_touch)(touch_id, device_id);
         }
         else {
-            (*self.on_reject_touch)(touch_id);
+            (*self.on_reject_touch)(touch_id, device_id);
         }
     }
 
-    pub fn handle_touch_start(&mut self, touch_id:i32, x:f64, y:f64) {
+    pub fn handle_touch_start(&mut self, touch_id:i32, device_id:i32, x:f64, y:f64) {
         if self.current_is_ruined {
-            self.reject_touch(touch_id);
+            self.reject_touch(touch_id, device_id);
             return;
         }
 
         if let Some(side) = self.get_touch_side(x, y) {
             match self.current_side {
                 Some(current_side) if current_side != side => {
-                    self.reject_touch(touch_id);
+                    self.reject_touch(touch_id, device_id);
                     if !self.active_touches.is_empty() {
                         // Don't mess up the state if there is no active gesture.
                         self.current_is_ruined = true;
@@ -129,19 +129,23 @@ impl <'a>GestureDetector<'a> {
                     return;
                 },
                 _ => {
+                    if self.accept_all {
+                        (*self.on_accept_touch)(touch_id, device_id);
+                    }
                     self.current_side = Some(side);
                 },
             }
 
             self.active_touches.insert(touch_id, Touch { 
                 touch_id: touch_id,
+                device_id: device_id,
                 start_x: x,
                 start_y: y, 
-                is_decided: false,
+                is_decided: self.accept_all,
             });
         }
         else {
-            self.reject_touch(touch_id);
+            self.reject_touch(touch_id, device_id);
             if !self.active_touches.is_empty() {
                 // Don't mess up the state if there is no active gesture.
                 self.current_is_ruined = true;
@@ -188,45 +192,46 @@ impl <'a>GestureDetector<'a> {
         }
     }
 
-    pub fn handle_single_touch(&mut self, touch_id: i32, x: f64, y:f64) {
+    pub fn handle_touch_update(&mut self, touch_id: i32, x: f64, y: f64) {
         if !self.active_touches.contains_key(&touch_id) {
-            println!("Unexpected touch event for touch #{}.", touch_id);
             // Do not reject it, otherwise BadValue crashes the system, in case
             // it was already accepted.
+            //
+            // Also, the event might be from a touch that comes from a failed
+            // touch when the device is grabbed.
             return;
         }
 
-        let touch = self.active_touches.get_mut(&touch_id).unwrap();
+        {
+            let touch = self.active_touches.get_mut(&touch_id).unwrap();
 
-        match get_touch_direction(self.config, &touch, x, y) {
-            Some(ref direction) if self.current_direction == None => {
-                if !is_valid_combination(self.current_side.unwrap(), *direction) {
+            match get_touch_direction(self.config, &touch, x, y) {
+                Some(ref direction) if self.current_direction == None => {
+                    if !is_valid_combination(self.current_side.unwrap(), *direction) {
+                        self.current_is_ruined = true;
+                    }
+                    else if !touch.is_decided {
+                        self.current_direction = Some(*direction);
+                        self.current_num_touches += 1;
+                        (*self.on_accept_touch)(touch.touch_id, touch.device_id);
+                        touch.is_decided = true;
+                    }
+                },
+                Some(ref direction)  if self.current_direction.unwrap() == *direction => {
+                    if !touch.is_decided {
+                        (*self.on_accept_touch)(touch.touch_id, touch.device_id);
+                        self.current_num_touches += 1;
+                        touch.is_decided = true;
+                    }
+                },
+                Some(_) => {
                     self.current_is_ruined = true;
-                }
-                else if !touch.is_decided {
-                    self.current_direction = Some(*direction);
-                    self.current_num_touches += 1;
-                    (*self.on_accept_touch)(touch.touch_id);
-                    touch.is_decided = true;
-                }
-            },
-            Some(ref direction)  if self.current_direction.unwrap() == *direction => {
-                if !touch.is_decided {
-                    (*self.on_accept_touch)(touch.touch_id);
-                    self.current_num_touches += 1;
-                    touch.is_decided = true;
-                }
-            },
-            Some(_) => {
-                self.current_is_ruined = true;
-            },
-            None => {
-            },
+                },
+                None => {
+                },
+            }
         }
-    }
 
-    pub fn handle_touch_update(&mut self, touch_id: i32, x: f64, y: f64) {
-        self.handle_single_touch(touch_id, x, y);
         if self.current_is_ruined {
             reject_touches(&mut self.active_touches, if self.accept_all { self.on_accept_touch } else { self.on_reject_touch });
         }
@@ -266,11 +271,11 @@ fn get_touch_direction(config: &Config, touch: &Touch, end_x: f64, end_y: f64) -
     }
 }
 
-fn reject_touches(touches: &mut HashMap<i32, Touch>, on_reject_touch: &mut FnMut(i32))
+fn reject_touches(touches: &mut HashMap<i32, Touch>, on_reject_touch: &mut FnMut(i32, i32))
 {
     for (_, touch) in touches {
         if !touch.is_decided {
-            on_reject_touch(touch.touch_id);
+            on_reject_touch(touch.touch_id, touch.device_id);
             touch.is_decided = true;
         }
     }

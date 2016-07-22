@@ -1,6 +1,6 @@
 [package]
 name = "edgy"
-version = "0.0.1"
+version = "0.0.2"
 authors = [ "Jasu <jasu@xn--njmtys-xxab.info>" ]
 license = "ISC"
 description = "Run commands on screen edge crossing touch screen gestures."

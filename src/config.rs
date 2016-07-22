@@ -1,3 +1,5 @@
+use actions::Action;
+
 pub struct Config {
   pub screen_width: f64,
   pub screen_height: f64,
@@ -8,5 +10,6 @@ pub struct Config {
   pub detection_threshold: f64,
 
   pub device_ids: Vec<i32>,
-}
 
+  pub actions: Vec<Action>,
+}

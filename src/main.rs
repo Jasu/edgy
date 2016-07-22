@@ -1,10 +1,11 @@
 mod gesture_detector;
 mod config;
 mod actions;
+mod xconn;
+mod devicegrab;
 
 #[macro_use]
 extern crate nom;
-
 extern crate x11;
 extern crate clap;
 
@@ -15,23 +16,32 @@ use std::ffi::{
 
 use std::mem::{zeroed, transmute};
 
-use std::ptr::{
-    null,
-    null_mut,
-};
-
 use std::vec::Vec;
 
-use std::os::raw::{c_int, c_ulong, c_uchar};
+use std::os::raw::{c_int, c_uchar};
 use x11::{xlib, xinput2};
 
 use clap::{App, Arg};
 
 use config::Config;
 use gesture_detector::GestureDetector;
-use actions::{Action, parse_action};
+use actions::parse_action;
+use xconn::*;
 
 fn main () {
+
+    initialize_x11();
+
+    if !has_xinput() {
+        panic!("XInput extension is not available.");
+    }
+
+    if !has_xinput_2_2() {
+        panic!("XInput extension is below XInput 2.2.");
+    }
+
+    grab_touch_begin();
+
     let matches = App::new("Edgy")
         .version("0.1.0")
         .author("Jasper Mattsson <jasu@njomotys.info>")
@@ -65,23 +75,19 @@ fn main () {
         device_names.push(String::from(name));
     }
 
-    let (display, root_window) = initialize_x();
+    let (width, height) = get_root_window_size();
 
-    if !has_xinput(display) {
-        panic!("XInput extension is not available.");
+    let mut actions = Vec::new();
+
+    for action_string in matches.values_of("action").unwrap() {
+        let s = action_string.to_string();
+        match parse_action(s.as_bytes()) {
+            Some(action) => actions.push(action),
+            None => panic!("Action was not parsed."),
+        }
     }
 
-    if !has_xinput_2_2(display) {
-        panic!("XInput extension is below XInput 2.2.");
-    }
-
-
-
-    grab_touch_begin(display, root_window);
-
-    let (width, height) = get_window_size(display, root_window);
-
-    let mut config = Config {
+    let config = Config {
         screen_width: width as f64,
         screen_height: height as f64,
 
@@ -100,109 +106,59 @@ fn main () {
             .parse::<f64>()
             .unwrap(),
 
-        device_ids: Vec::new(),
+        device_ids: find_xinput_devices_by_name(device_names),
+
+        actions: actions,
     };
 
-    config.device_ids = find_xinput_devices_by_name(display, device_names);
-
-    let mut actions = Vec::new();
-    for action_string in matches.values_of("action").unwrap() {
-        let s = action_string.to_string();
-        match parse_action(s.as_bytes()) {
-            Some(action) => actions.push(action),
-            None => panic!("Action was not parsed."),
-        }
-    }
-
-    run_event_loop(display, root_window, &config, actions);
+    run_event_loop(&config);
 }
 
-fn get_window_size(display: *mut xlib::Display, window: xlib::Window) -> (u32, u32) {
-    let mut root:xlib::Window = 0;
-    let mut x = 0;
-    let mut y = 0;
-    let mut width = 0;
-    let mut height = 0;
-    let mut border_width = 0;
-    let mut depth = 0;
-    if unsafe { xlib::XGetGeometry(display,
-                                   window,
-                                   &mut root,
-                                   &mut x,
-                                   &mut y,
-                                   &mut width,
-                                   &mut height,
-                                   &mut border_width, &mut depth) } == xlib::False
-    {
-        panic!("Could not get window geometry.");
+
+fn accept_touch(touch_id:i32, device_id: i32) {
+    if device_id != 2 {
+        // The event is from device grab, not touch grab, ignore it.
+        return;
     }
 
-    (width, height)
-}
-
-fn grab_touch_begin(display: *mut xlib::Display,
-                    window: xlib::Window)
-{
-    // The pointer root device (id=2) is grabbed here. Grabbing a single device
-    // does not seem to work (events are received AFTER they are processed by 
-    // other applications, even for grabs.)
-
-    let mut mask: [c_uchar; 4] = [0; 4];
-    let mut modifiers =  xinput2::XIGrabModifiers {
-        modifiers: 1 << 31,
-        status: 0,
-    };
-    let mut input_event_mask = xinput2::XIEventMask {
-        deviceid: 2,
-        mask_len: mask.len() as i32,
-        mask: mask.as_mut_ptr(),
-    };
-
-    for &event in &[xinput2::XI_TouchBegin,
-                    xinput2::XI_TouchUpdate,
-                    xinput2::XI_TouchEnd, ]
-    {
-        xinput2::XISetMask(&mut mask, event);
-    }
-
-    if unsafe { xinput2::XIGrabTouchBegin(display,
-                                          2,
-                                          window,
-                                          /*owner_events=*/xlib::False,
-                                          &mut input_event_mask,
-                                          /*num_modifiers=*/1,
-                                          &mut modifiers) } != 0
-    {
-        panic!("Could not grab TouchBegin.");
-    }
-}
-
-fn accept_touch(display: *mut xlib::Display, window: xlib::Window, touch_id:i32) {
     unsafe { 
-        xinput2::XIAllowTouchEvents(display, /*device_id=*/2, touch_id as u32, window, xinput2::XIAcceptTouch);
+        xinput2::XIAllowTouchEvents(display.unwrap(),
+                                    device_id,
+                                    touch_id as u32,
+                                    root_window,
+                                    xinput2::XIAcceptTouch);
     }
 }
 
-fn reject_touch(display: *mut xlib::Display, window: xlib::Window, touch_id:i32) {
+fn reject_touch(touch_id:i32, device_id: i32) {
+    if device_id != 2 {
+        // The event is from device grab, not touch grab, ignore it.
+        return;
+    }
+
     unsafe {
-        xinput2::XIAllowTouchEvents(display, /*device_id=*/2, touch_id as u32, window, xinput2::XIRejectTouch);
+        xinput2::XIAllowTouchEvents(display.unwrap(),
+                                    device_id,
+                                    touch_id as u32,
+                                    root_window,
+                                    xinput2::XIRejectTouch);
     }
 }
 
-fn run_event_loop(display: *mut xlib::Display, window: xlib::Window, config: &Config, actions: Vec<Action>) {
+fn run_event_loop(config:&Config) {
 
     let mut event: xlib::XEvent = unsafe { zeroed() };
 
-    let mut on_accept_touch = & mut |touch_id| {
-        accept_touch(display, window, touch_id);
+    let mut on_accept_touch = & mut |touch_id, device_id| {
+        accept_touch(touch_id, device_id);
     };
 
-    let mut on_reject_touch = & mut |touch_id| {
-        reject_touch(display, window, touch_id);
+    let mut on_reject_touch = & mut |touch_id, device_id| {
+        reject_touch(touch_id, device_id);
     };
 
     let mut on_gesture = &mut |gd : &mut GestureDetector, side, direction, num_touches| {
-        for action in &actions {
+        for action in &config.actions {
             if action.side == side && action.direction == direction && action.num_fingers == num_touches
             {
                 (action.function)(gd);
@@ -211,15 +167,16 @@ fn run_event_loop(display: *mut xlib::Display, window: xlib::Window, config: &Co
     };
 
     let mut gesture_detector = GestureDetector::new(
-        config,
+        &config,
         on_accept_touch,
         on_reject_touch,
         on_gesture
         );
 
     loop {
-        unsafe { xlib::XNextEvent(display, &mut event) };
+        unsafe { xlib::XNextEvent(display.unwrap(), &mut event) };
         if event.get_type() != xlib::GenericEvent {
+            println!("Non-generic event.");
             continue;
         }
 
@@ -229,7 +186,7 @@ fn run_event_loop(display: *mut xlib::Display, window: xlib::Window, config: &Co
 
         let mut cookie:xlib::XGenericEventCookie = From::from(event);
 
-        if unsafe { xlib::XGetEventData(display, &mut cookie) } != xlib::True {
+        if unsafe { xlib::XGetEventData(display.unwrap(), &mut cookie) } != xlib::True {
             println!("XGetEventData failed.");
             continue;
         }
@@ -252,11 +209,11 @@ fn run_event_loop(display: *mut xlib::Display, window: xlib::Window, config: &Co
                 }
 
                 if !found {
-                    reject_touch(display, window, event_data.detail);
+                    reject_touch(event_data.detail, event_data.deviceid);
                     continue;
                 }
 
-                gesture_detector.handle_touch_start(event_data.detail, event_data.root_x, event_data.root_y);
+                gesture_detector.handle_touch_start(event_data.detail, event_data.deviceid, event_data.root_x, event_data.root_y);
             },
             xinput2::XI_TouchUpdate => {
                 let event_data: &xinput2::XIDeviceEvent = unsafe{ transmute(cookie.data) };
@@ -268,14 +225,12 @@ fn run_event_loop(display: *mut xlib::Display, window: xlib::Window, config: &Co
             },
             xinput2::XI_TouchOwnership => {
             }
-            _ => {
-                println!("Unknown event.");
-            }
+            _ => { }
         }
     }
 }
 
-fn has_xinput(display:*mut xlib::Display) -> bool {
+fn has_xinput() -> bool {
     let mut opcode:c_int = 0;
     let mut event:c_int = 0;
     let mut error:c_int = 0;
@@ -283,16 +238,16 @@ fn has_xinput(display:*mut xlib::Display) -> bool {
     let xinput_name = CString::new("XInputException").unwrap();
 
     unsafe{
-        xlib::XQueryExtension(display, xinput_name.as_ptr(), &mut opcode, &mut event, &mut error) != xlib::True
+        xlib::XQueryExtension(display.unwrap(), xinput_name.as_ptr(), &mut opcode, &mut event, &mut error) != xlib::True
     }
 }
 
-fn has_xinput_2_2(display:*mut xlib::Display) -> bool {
+fn has_xinput_2_2() -> bool {
     let mut version_major = 2;
     let mut version_minor = 2;
 
     unsafe {
-        if xinput2::XIQueryVersion(display, &mut version_major, &mut version_minor) != xlib::Success as c_int 
+        if xinput2::XIQueryVersion(display.unwrap(), &mut version_major, &mut version_minor) != xlib::Success as c_int 
         {
             return false;
         }
@@ -301,24 +256,49 @@ fn has_xinput_2_2(display:*mut xlib::Display) -> bool {
     version_major > 2 || version_major == 2 && version_minor >= 2
 }
 
-fn for_each_xinput_device<F>(display:*mut xlib::Display, f: &mut F) -> ()
-    where F: FnMut(*mut xinput2::XIDeviceInfo) -> () {
-        let mut device_count = 0;
-        unsafe {
-            let devices = xinput2::XIQueryDevice(display, xinput2::XIAllDevices, &mut device_count);
-            for i in 0..device_count {
-                let device = devices.offset(i as isize);
-                f(device);
-            }
-            xinput2::XIFreeDeviceInfo(devices);
-        }
-
+fn get_root_window_size() -> (u32, u32) {
+    let mut root:xlib::Window = 0;
+    let mut x = 0;
+    let mut y = 0;
+    let mut width = 0;
+    let mut height = 0;
+    let mut border_width = 0;
+    let mut depth = 0;
+    if unsafe { xlib::XGetGeometry(display.unwrap(),
+                                   root_window,
+                                   &mut root,
+                                   &mut x,
+                                   &mut y,
+                                   &mut width,
+                                   &mut height,
+                                   &mut border_width, &mut depth) } == xlib::False
+    {
+        panic!("Could not get window geometry.");
     }
 
-fn find_xinput_devices_by_name(display:*mut xlib::Display, names:Vec<String>) -> Vec<c_int> {
+    (width, height)
+}
+
+
+
+fn for_each_xinput_device<F>(f: &mut F) -> ()
+    where F: FnMut(*mut xinput2::XIDeviceInfo) -> () 
+{
+    let mut device_count = 0;
+    unsafe {
+        let devices = xinput2::XIQueryDevice(display.unwrap(), xinput2::XIAllDevices, &mut device_count);
+        for i in 0..device_count {
+            let device = devices.offset(i as isize);
+            f(device);
+        }
+        xinput2::XIFreeDeviceInfo(devices);
+    }
+}
+
+fn find_xinput_devices_by_name(names:Vec<String>) -> Vec<c_int> {
     let mut result:Vec<c_int> = Vec::new();
 
-    for_each_xinput_device(display, &mut |device:*mut xinput2::XIDeviceInfo| {
+    for_each_xinput_device(&mut |device:*mut xinput2::XIDeviceInfo| {
         unsafe {
             let current_name = CStr::from_ptr((*device).name).to_string_lossy();
             for name in &names {
@@ -341,17 +321,39 @@ fn find_xinput_devices_by_name(display:*mut xlib::Display, names:Vec<String>) ->
     result
 }
 
-fn initialize_x() -> (*mut xlib::Display, c_ulong) {
-    let display = unsafe { xlib::XOpenDisplay(null()) };
+pub fn grab_touch_begin()
+{
+    // The pointer root device (id=2) is grabbed here. Grabbing a single device
+    // does not seem to work (events are received AFTER they are processed by 
+    // other applications, even for grabs.)
 
-    if display == null_mut() {
-        panic!("Display could not be opened.");
-    }
-
-    let root_window = unsafe { 
-        xlib::XRootWindow(display, xlib::XDefaultScreen(display))
+    let mut mask: [c_uchar; 4] = [0; 4];
+    let mut modifiers =  xinput2::XIGrabModifiers {
+        modifiers: 1 << 31,
+        status: 0,
+    };
+    let mut input_event_mask = xinput2::XIEventMask {
+        deviceid: 2, //xinput2::XIAllDevices,
+        mask_len: mask.len() as i32,
+        mask: mask.as_mut_ptr(),
     };
 
-    (display, root_window)
-}
+    for &event in &[xinput2::XI_TouchBegin,
+                    xinput2::XI_TouchUpdate,
+                    xinput2::XI_TouchEnd,
+                    xinput2::XI_TouchOwnership, ]
+    {
+        xinput2::XISetMask(&mut mask, event);
+    }
 
+    if unsafe { xinput2::XIGrabTouchBegin(display.unwrap(),
+                                          2,
+                                          root_window,
+                                          /*owner_events=*/xlib::False,
+                                          &mut input_event_mask,
+                                          /*num_modifiers=*/1,
+                                          &mut modifiers) } != 0
+    {
+        panic!("Could not grab TouchBegin.");
+    }
+}

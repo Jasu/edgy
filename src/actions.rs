@@ -6,6 +6,7 @@ use nom::IResult::Done;
 use std::process::Command;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use devicegrab::*;
 
 pub struct Action {
     pub side: Side,
@@ -153,7 +154,7 @@ named!(disable_touchscreen<&[u8], Box<Fn(&mut GestureDetector) -> ()> >,
             touchscreen,
             || { 
                  Box::new(|gesture_detector:&mut GestureDetector| {
-                   gesture_detector.accept_all = true;
+                   grab_devices(&gesture_detector.config.device_ids);
                  })
                }
           ));
@@ -167,7 +168,7 @@ named!(enable_touchscreen<&[u8], Box<Fn(&mut GestureDetector) -> ()> >,
             touchscreen,
             || { 
                  Box::new(|gesture_detector:&mut GestureDetector| {
-                   gesture_detector.accept_all = false;
+                   ungrab_devices(&gesture_detector.config.device_ids);
                  })
                }
           ));
@@ -179,7 +180,7 @@ named!(toggle_touchscreen<&[u8], Box<Fn(&mut GestureDetector) -> ()> >,
             touchscreen,
             || { 
                  Box::new(|gesture_detector:&mut GestureDetector| {
-                   gesture_detector.accept_all = !gesture_detector.accept_all;
+                   toggle_grab_devices(&gesture_detector.config.device_ids);
                  })
                }
           )
@@ -225,7 +226,7 @@ named!(action<&[u8], Action>,
         )));
 
 pub fn parse_action(description:&[u8]) -> Option<Action> {
-    match action(description) {
+match action(description) {
         Done(_, action) => Some(action),
         _ => None
     }
