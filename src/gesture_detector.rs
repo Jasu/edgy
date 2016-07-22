@@ -170,10 +170,8 @@ impl <'a>GestureDetector<'a> {
             }
         }
 
-        // Remove before rejecting, since an ended touch cannot be rejected.
-        self.active_touches.remove(&touch_id);
-
-        if self.active_touches.is_empty() {
+        if self.active_touches.len() <= 1 {
+            // The only touch in the vector is the touch that just ended.
             if self.current_direction != None && self.current_side != None && !self.current_is_ruined {
                 let on_gesture = self.on_gesture.take().unwrap();
                 let current_side = self.current_side.unwrap();
@@ -187,8 +185,15 @@ impl <'a>GestureDetector<'a> {
                     current_num_touches);
                 self.on_gesture = Some(on_gesture);
             }
+            else {
+                reject_touches(&mut self.active_touches,
+                               if self.accept_all { self.on_accept_touch } else { self.on_reject_touch });
+            }
 
             self.reset_state();
+        }
+        else {
+            self.active_touches.remove(&touch_id);
         }
     }
 
@@ -233,7 +238,8 @@ impl <'a>GestureDetector<'a> {
         }
 
         if self.current_is_ruined {
-            reject_touches(&mut self.active_touches, if self.accept_all { self.on_accept_touch } else { self.on_reject_touch });
+            reject_touches(&mut self.active_touches,
+                           if self.accept_all { self.on_accept_touch } else { self.on_reject_touch });
         }
     }
 
