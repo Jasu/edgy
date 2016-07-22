@@ -48,10 +48,6 @@ pub struct GestureDetector<'a> {
     on_reject_touch: & 'a mut (FnMut(i32, i32) + 'a),
 
     on_gesture: Option<& 'a mut (FnMut(&mut GestureDetector, Side, Direction, u32) + 'a)>,
-
-    // If true, no touch is rejected, thus blocking touch screen from other 
-    // applications.
-    pub accept_all: bool,
 }
 
 impl <'a>GestureDetector<'a> {
@@ -71,7 +67,6 @@ impl <'a>GestureDetector<'a> {
                 on_accept_touch: on_accept_touch,
                 on_reject_touch: on_reject_touch,
                 on_gesture: Some(on_gesture),
-                accept_all: false,
             }
         }
 
@@ -102,36 +97,24 @@ impl <'a>GestureDetector<'a> {
         }
     }
 
-    fn reject_touch(&mut self, touch_id: i32, device_id: i32) {
-        if self.accept_all {
-            (*self.on_accept_touch)(touch_id, device_id);
-        }
-        else {
-            (*self.on_reject_touch)(touch_id, device_id);
-        }
-    }
-
     pub fn handle_touch_start(&mut self, touch_id:i32, device_id:i32, x:f64, y:f64) {
         if self.current_is_ruined {
-            self.reject_touch(touch_id, device_id);
+            (*self.on_reject_touch)(touch_id, device_id);
             return;
         }
 
         if let Some(side) = self.get_touch_side(x, y) {
             match self.current_side {
                 Some(current_side) if current_side != side => {
-                    self.reject_touch(touch_id, device_id);
+                    (*self.on_reject_touch)(touch_id, device_id);
                     if !self.active_touches.is_empty() {
                         // Don't mess up the state if there is no active gesture.
                         self.current_is_ruined = true;
-                        reject_touches(&mut self.active_touches, if self.accept_all { self.on_accept_touch } else { self.on_reject_touch}  );
+                        reject_touches(&mut self.active_touches, self.on_reject_touch);
                     }
                     return;
                 },
                 _ => {
-                    if self.accept_all {
-                        (*self.on_accept_touch)(touch_id, device_id);
-                    }
                     self.current_side = Some(side);
                 },
             }
@@ -141,15 +124,15 @@ impl <'a>GestureDetector<'a> {
                 device_id: device_id,
                 start_x: x,
                 start_y: y, 
-                is_decided: self.accept_all,
+                is_decided: false,
             });
         }
         else {
-            self.reject_touch(touch_id, device_id);
+            (*self.on_reject_touch)(touch_id, device_id);
             if !self.active_touches.is_empty() {
                 // Don't mess up the state if there is no active gesture.
                 self.current_is_ruined = true;
-                reject_touches(&mut self.active_touches, if self.accept_all { self.on_accept_touch } else { self.on_reject_touch });
+                reject_touches(&mut self.active_touches, self.on_reject_touch);
             }
         }
     }
@@ -186,8 +169,7 @@ impl <'a>GestureDetector<'a> {
                 self.on_gesture = Some(on_gesture);
             }
             else {
-                reject_touches(&mut self.active_touches,
-                               if self.accept_all { self.on_accept_touch } else { self.on_reject_touch });
+                reject_touches(&mut self.active_touches, self.on_reject_touch);
             }
 
             self.reset_state();
@@ -238,8 +220,7 @@ impl <'a>GestureDetector<'a> {
         }
 
         if self.current_is_ruined {
-            reject_touches(&mut self.active_touches,
-                           if self.accept_all { self.on_accept_touch } else { self.on_reject_touch });
+            reject_touches(&mut self.active_touches, self.on_reject_touch);
         }
     }
 
